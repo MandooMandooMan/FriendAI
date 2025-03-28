@@ -5,10 +5,13 @@ import torchaudio
 import io
 from huggingface_hub import hf_hub_download
 from generator import load_csm_1b, Segment
+from faster_whisper import WhisperModel
 
 app = Flask(__name__)
 generator = load_csm_1b("cpu")  # or "cuda" if available
-
+# generator = load_csm_1b("cuda")
+whisper_model = WhisperModel("base", compute_type="int8")  # or "cpu", "float16", etc.
+# whisper_model = WhisperModel("base", compute_type="float16", device="cuda")
 prompt_filepath_conversational_a = hf_hub_download(
     repo_id="sesame/csm-1b",
     filename="prompts/conversational_a.wav"
@@ -88,22 +91,27 @@ def generate_audio():
 
     return send_file(buffer, mimetype="audio/wav", as_attachment=False, download_name="tts.wav")
 
-# @app.route('/generate-audio', methods=['POST'])
-# def generate_audio():
-#     data = request.json
-#     text = data.get("text", "")
-#     speaker_id = data.get("speaker_id", 0)
 
-#     # Use a default prompt
-#     prompt = Segment(text="Hello, this is a prompt.", speaker=speaker_id, audio=torch.randn(16000))
+# Whisper model
+@app.route("/transcribe-audio", methods=["POST"])
+def transcribe_audio():
+    if "file" not in request.files:
+        return {"error": "No file provided"}, 400
 
-#     # Generate audio
-#     audio_tensor = generator.generate(text=text, speaker=speaker_id, context=[prompt])
-    
-#     # Save to temp wav file
-#     with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as tmp_file:
-#         torchaudio.save(tmp_file.name, audio_tensor.unsqueeze(0), generator.sample_rate)
-#         return send_file(tmp_file.name, mimetype="audio/wav", as_attachment=True, download_name="voice.wav")
+    audio_file = request.files["file"]
+
+    # Load the audio into memory and transcribe
+    audio_bytes = audio_file.read()
+    audio_tensor, sample_rate = torchaudio.load(io.BytesIO(audio_bytes))
+
+    # Save to a temporary file because faster-whisper expects a filepath
+    with open("temp.wav", "wb") as f:
+        f.write(audio_bytes)
+
+    segments, _ = whisper_model.transcribe("temp.wav")
+
+    full_text = " ".join([segment.text for segment in segments])
+    return {"transcription": full_text}
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5005)

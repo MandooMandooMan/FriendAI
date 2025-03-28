@@ -6,6 +6,7 @@ import { useState } from "react";
 import { TextInput } from "react-native";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system";
+import { useEffect, useRef } from "react";
 
 export default function VoiceCall() {
   const { id } = useLocalSearchParams();
@@ -14,9 +15,21 @@ export default function VoiceCall() {
   const [isSpeaker, setIsSpeaker] = useState(false);
   const [userInput, setUserInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
+  const [recording, setRecording] = useState<Audio.Recording | null>(null);
+  const isPlayingAudio = useRef(false);
+  const [isListening, setIsListening] = useState(false);
   const handleEndCall = () => {
     router.back();
   };
+
+  useEffect(() => {
+    startRecordingLoop();
+    return () => {
+      if (recording) {
+        recording.stopAndUnloadAsync();
+      }
+    };
+  }, []);
   const handleUserInput = async (text: string) => {
     try {
       setIsLoading(true);
@@ -36,18 +49,19 @@ export default function VoiceCall() {
   };
 
   const getAIResponse = async (message: string) => {
-    const res = await fetch("https://api.x.ai/v1/chat/completions", {
+    const res = await fetch("http://localhost:1234/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer xai-yq6nrubsbHkhRKB9jVDVQQXaBzq4RRwOYVPqdasgcVl2P9Y4gsUsxl0lCvh9rqcIAPZaS4g1k1BdlQLo`,
+        Authorization: "Bearer no-key",
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: "grok-2-latest",
+        model: "dolphin-3-llama3.1-8b",
         messages: [
           {
             role: "system",
-            content: "You are a warm, friendly AI character named Emma.",
+            content:
+              "You are a warm, friendly AI character named Emma. You speak like a real human friend, not like a robot.",
           },
           { role: "user", content: message },
         ],
@@ -59,7 +73,7 @@ export default function VoiceCall() {
   };
 
   async function handleSendInput(inputText: string) {
-    const response = await fetch("http://192.168.0.34:5005/generate-audio", {
+    const response = await fetch("https://6146-34-87-139-150.ngrok-free.app/generate-audio", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: inputText, speaker_id: 0 }),
@@ -97,22 +111,147 @@ export default function VoiceCall() {
     reader.readAsDataURL(blob);
   }
 
-  const fetchVoiceFromCSM = async (text: string) => {
+  const startRecordingLoop = async () => {
+    while (true) {
+      if (isPlayingAudio.current) {
+        // Wait while audio is playing
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        continue;
+      }
+
+      console.log("🎤 Starting recording...");
+      const { granted } = await Audio.requestPermissionsAsync();
+      if (!granted) {
+        console.error("❌ Microphone permission denied");
+        return;
+      }
+
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      const recording = new Audio.Recording();
+      await recording.prepareToRecordAsync(recordingOptions);
+      await recording.startAsync();
+      setRecording(recording);
+      setIsListening(true);
+
+      // Record for 5 seconds (or use silence detection logic later)
+      await new Promise((resolve) => setTimeout(resolve, 5000));
+
+      await recording.stopAndUnloadAsync();
+      const uri = recording.getURI();
+      setRecording(null);
+      setIsListening(false);
+      if (!uri) continue;
+
+      await transcribeAndRespond(uri);
+    }
+  };
+
+  const transcribeAndRespond = async (uri: string) => {
     try {
-      const response = await fetch("http://192.168.0.34:5005/generate-audio", {
+      const file = {
+        uri,
+        name: "audio.wav",
+        type: "audio/wav",
+      };
+
+      const formData = new FormData();
+      formData.append("file", file as any);
+
+      const response = await fetch("https://6146-34-87-139-150.ngrok-free.app/transcribe-audio", {
+        method: "POST",
+        body: formData,
+        headers: {
+          "Content-Type": "multipart/form-data",
+        },
+      });
+
+      const result = await response.json();
+      const userSpeech = result.transcription;
+      console.log("🎙️ You said:", userSpeech);
+
+      if (!userSpeech) return;
+
+      const aiText = await getAIResponse(userSpeech);
+      await playTTS(aiText);
+    } catch (err) {
+      console.error("🔥 Error during transcription or TTS:", err);
+    }
+  };
+
+  const playTTS = async (text: string) => {
+    try {
+      isPlayingAudio.current = true;
+
+      const response = await fetch("https://6146-34-87-139-150.ngrok-free.app/generate-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, speaker_id: 0 }),
       });
 
-      const blob = await response.blob();
-      const uri = URL.createObjectURL(blob);
+      if (!response.ok) {
+        console.error("❌ Error generating audio");
+        return;
+      }
 
-      const { sound } = await Audio.Sound.createAsync({ uri });
-      await sound.playAsync();
-    } catch (error) {
-      console.error("❌ Error generating audio from CSM:", error);
+      const blob = await response.blob();
+      const reader = new FileReader();
+
+      reader.onloadend = async () => {
+        const base64Audio =
+          typeof reader.result === "string"
+            ? reader.result.split(",")[1]
+            : null;
+
+        if (!base64Audio) return;
+
+        const fileUri = FileSystem.documentDirectory + "tts_output.wav";
+        await FileSystem.writeAsStringAsync(fileUri, base64Audio, {
+          encoding: FileSystem.EncodingType.Base64,
+        });
+
+        const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
+        await sound.playAsync();
+        sound.setOnPlaybackStatusUpdate((status) => {
+          if (status.isLoaded && !status.isPlaying) {
+            isPlayingAudio.current = false;
+          }
+        });
+      };
+
+      reader.readAsDataURL(blob);
+    } catch (err) {
+      console.error("❌ Error playing TTS audio", err);
+      isPlayingAudio.current = false;
     }
+  };
+
+  const recordingOptions: Audio.RecordingOptions = {
+    android: {
+      extension: ".m4a",
+      outputFormat: 2, // MPEG_4
+      audioEncoder: 3, // AAC
+      sampleRate: 44100,
+      numberOfChannels: 1,
+      bitRate: 128000,
+    },
+    ios: {
+      extension: ".wav",
+      audioQuality: 128, // HIGH
+      sampleRate: 44100,
+      numberOfChannels: 1,
+      bitRate: 128000,
+      linearPCMBitDepth: 16,
+      linearPCMIsBigEndian: false,
+      linearPCMIsFloat: false,
+    },
+    web: {
+      mimeType: "audio/webm",
+      bitsPerSecond: 128000,
+    },
   };
 
   return (
@@ -163,7 +302,11 @@ export default function VoiceCall() {
             setUserInput("");
           }}
         />
-
+        {isListening && (
+          <Text style={{ color: "#00FF99", marginTop: 12, fontWeight: "500" }}>
+            🎙️ Listening...
+          </Text>
+        )}
         {isLoading && (
           <Text style={{ color: "#aaa" }}>Emma is thinking...</Text>
         )}

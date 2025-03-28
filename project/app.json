@@ -21,15 +21,8 @@
       "favicon": "./assets/images/favicon.png"
     },
     "plugins": [
-      "expo-router",
-      [
-        "expo-auth-session",
-        {
-          "scheme": "myapp"
-        }
-      ]
+      "expo-router"
     ],
-    "scheme": "myapp",
     "experiments": {
       "typedRoutes": true
     }
