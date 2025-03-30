@@ -1,12 +1,12 @@
-import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
+import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { Phone, Mic, Volume2, X } from "lucide-react-native";
-import { useState } from "react";
+import { Mic, Volume2, X } from "lucide-react-native";
+import { useState, useEffect, useRef } from "react";
 import { TextInput } from "react-native";
 import { Audio } from "expo-av";
 import * as FileSystem from "expo-file-system";
-import { useEffect, useRef } from "react";
+import { Buffer } from "buffer";
 
 export default function VoiceCall() {
   const { id } = useLocalSearchParams();
@@ -17,36 +17,33 @@ export default function VoiceCall() {
   const [isLoading, setIsLoading] = useState(false);
   const [recording, setRecording] = useState<Audio.Recording | null>(null);
   const isPlayingAudio = useRef(false);
-  const [isListening, setIsListening] = useState(false);
-  const handleEndCall = () => {
-    router.back();
-  };
+  const soundRef = useRef<Audio.Sound | null>(null);
+  const [statusText, setStatusText] = useState("🎙️ Listening...");
+  const bounceAnim = useRef(new Animated.Value(1)).current;
+  const [showWaveform, setShowWaveform] = useState(false);
 
   useEffect(() => {
-    startRecordingLoop();
-    return () => {
-      if (recording) {
-        recording.stopAndUnloadAsync();
-      }
-    };
-  }, []);
-  const handleUserInput = async (text: string) => {
-    try {
-      setIsLoading(true);
-      const aiText = await getAIResponse(text);
-      console.log("AI Response:", aiText);
-
-      // TODO: Call local CSM Python script via native module or pre-generated audio
-      // For now, just log the message
-      console.log("🗣️ TTS Output would be:", aiText);
-      handleSendInput(aiText);
-      // Here you’d use expo-av or react-native-sound to play audio
-    } catch (err) {
-      console.error("Error handling user input:", err);
-    } finally {
-      setIsLoading(false);
+    if (showWaveform) {
+      Animated.loop(
+        Animated.sequence([
+          Animated.timing(bounceAnim, {
+            toValue: 1.4,
+            duration: 300,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+          Animated.timing(bounceAnim, {
+            toValue: 1,
+            duration: 300,
+            easing: Easing.inOut(Easing.ease),
+            useNativeDriver: true,
+          }),
+        ])
+      ).start();
+    } else {
+      bounceAnim.stopAnimation();
     }
-  };
+  }, [showWaveform]);
 
   const getAIResponse = async (message: string) => {
     const res = await fetch("http://localhost:1234/v1/chat/completions", {
@@ -67,62 +64,23 @@ export default function VoiceCall() {
         ],
       }),
     });
-
     const json = await res.json();
     return json.choices?.[0]?.message?.content;
   };
 
-  async function handleSendInput(inputText: string) {
-    const response = await fetch("https://6146-34-87-139-150.ngrok-free.app/generate-audio", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ text: inputText, speaker_id: 0 }),
-    });
-
-    if (!response.ok) {
-      console.error("❌ Error generating audio from CSM");
-      return;
-    }
-
-    const blob = await response.blob();
-    const reader = new FileReader();
-
-    reader.onloadend = async () => {
-      const base64Audio =
-        typeof reader.result === "string" ? reader.result.split(",")[1] : null;
-
-      if (!base64Audio) {
-        console.error("❌ Failed to read audio blob");
-        return;
-      }
-
-      // Save to temporary file
-      const fileUri = FileSystem.documentDirectory + "output.wav";
-      await FileSystem.writeAsStringAsync(fileUri, base64Audio, {
-        encoding: FileSystem.EncodingType.Base64,
-      });
-
-      // Play it
-      const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
-      await sound.playAsync();
-      console.log("🔊 Played audio from CSM");
-    };
-
-    reader.readAsDataURL(blob);
-  }
-
   const startRecordingLoop = async () => {
     while (true) {
       if (isPlayingAudio.current) {
-        // Wait while audio is playing
-        await new Promise((resolve) => setTimeout(resolve, 1000));
+        await new Promise((res) => setTimeout(res, 1000));
         continue;
       }
 
       console.log("🎤 Starting recording...");
+      setStatusText("🎙️ Listening...");
+
       const { granted } = await Audio.requestPermissionsAsync();
       if (!granted) {
-        console.error("❌ Microphone permission denied");
+        console.error("❌ Mic permission denied");
         return;
       }
 
@@ -131,54 +89,70 @@ export default function VoiceCall() {
         playsInSilentModeIOS: true,
       });
 
-      const recording = new Audio.Recording();
-      await recording.prepareToRecordAsync(recordingOptions);
-      await recording.startAsync();
-      setRecording(recording);
-      setIsListening(true);
+      const rec = new Audio.Recording();
+      await rec.prepareToRecordAsync(recordingOptions);
+      await rec.startAsync();
+      setRecording(rec);
 
-      // Record for 5 seconds (or use silence detection logic later)
-      await new Promise((resolve) => setTimeout(resolve, 5000));
+      await new Promise((res) => setTimeout(res, 5000));
 
-      await recording.stopAndUnloadAsync();
-      const uri = recording.getURI();
+      await rec.stopAndUnloadAsync();
+      const uri = rec.getURI();
       setRecording(null);
-      setIsListening(false);
       if (!uri) continue;
 
-      await transcribeAndRespond(uri);
+      // Read and compute RMS
+      const fileInfo = await FileSystem.readAsStringAsync(uri, {
+        encoding: FileSystem.EncodingType.Base64,
+      });
+      const buffer = Buffer.from(fileInfo, "base64");
+      const view = new DataView(buffer.buffer);
+
+      let sumSquares = 0;
+      for (let i = 0; i < view.byteLength; i += 2) {
+        const sample = view.getInt16(i, true); // little endian
+        sumSquares += sample * sample;
+      }
+      const rms = Math.sqrt(sumSquares / (view.byteLength / 2));
+      console.log("🔈 RMS:", rms);
+
+      if (rms < 500) {
+        console.log("🤫 Too quiet, skipping transcription");
+        continue;
+      }
+
+      const text = await transcribeAudio(uri);
+      if (!text.trim()) continue;
+      console.log("🎙️ You said:", text);
+
+      setStatusText("🧠 Emma is thinking...");
+      const aiResponse = await getAIResponse(text);
+
+      await playTTS(aiResponse);
     }
   };
 
-  const transcribeAndRespond = async (uri: string) => {
+  const transcribeAudio = async (uri: string): Promise<string> => {
     try {
       const file = {
         uri,
         name: "audio.wav",
         type: "audio/wav",
       };
-
       const formData = new FormData();
       formData.append("file", file as any);
 
-      const response = await fetch("https://6146-34-87-139-150.ngrok-free.app/transcribe-audio", {
+      const res = await fetch("http://localhost:5005/transcribe-audio", {
         method: "POST",
         body: formData,
-        headers: {
-          "Content-Type": "multipart/form-data",
-        },
+        headers: { "Content-Type": "multipart/form-data" },
       });
 
-      const result = await response.json();
-      const userSpeech = result.transcription;
-      console.log("🎙️ You said:", userSpeech);
-
-      if (!userSpeech) return;
-
-      const aiText = await getAIResponse(userSpeech);
-      await playTTS(aiText);
-    } catch (err) {
-      console.error("🔥 Error during transcription or TTS:", err);
+      const json = await res.json();
+      return json.transcription ?? "";
+    } catch (e) {
+      console.error("❌ Transcription error:", e);
+      return "";
     }
   };
 
@@ -186,61 +160,104 @@ export default function VoiceCall() {
     try {
       isPlayingAudio.current = true;
 
-      const response = await fetch("https://6146-34-87-139-150.ngrok-free.app/generate-audio", {
+      const res = await fetch("http://localhost:5005/generate-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, speaker_id: 0 }),
       });
 
-      if (!response.ok) {
-        console.error("❌ Error generating audio");
-        return;
-      }
-
-      const blob = await response.blob();
+      if (!res.ok) throw new Error("TTS generation failed");
+      const blob = await res.blob();
       const reader = new FileReader();
 
       reader.onloadend = async () => {
-        const base64Audio =
-          typeof reader.result === "string"
-            ? reader.result.split(",")[1]
-            : null;
-
-        if (!base64Audio) return;
+        const base64 = typeof reader.result === "string" ? reader.result.split(",")[1] : null;
+        if (!base64) return;
 
         const fileUri = FileSystem.documentDirectory + "tts_output.wav";
-        await FileSystem.writeAsStringAsync(fileUri, base64Audio, {
+        await FileSystem.writeAsStringAsync(fileUri, base64, {
           encoding: FileSystem.EncodingType.Base64,
         });
-
         const { sound } = await Audio.Sound.createAsync({ uri: fileUri });
-        await sound.playAsync();
+        soundRef.current = sound;
+        setStatusText("🗣️ Emma is speaking...");
+        setShowWaveform(true);
+
         sound.setOnPlaybackStatusUpdate((status) => {
-          if (status.isLoaded && !status.isPlaying) {
+          if (status.isLoaded && status.didJustFinish) {
             isPlayingAudio.current = false;
+            setShowWaveform(false);
+            setStatusText("🎙️ Listening...");
           }
         });
+
+        await sound.playAsync();
+
+        // Start mic monitor for user interruption
+        const mic = new Audio.Recording();
+        await mic.prepareToRecordAsync(recordingOptions);
+        await mic.startAsync();
+
+        let interrupted = false;
+        for (let i = 0; i < 30; i++) {
+          await new Promise((res) => setTimeout(res, 200));
+          try {
+            await mic.stopAndUnloadAsync();
+            const uri = mic.getURI();
+            if (!uri) continue;
+
+            const fileInfo = await FileSystem.readAsStringAsync(uri, {
+              encoding: FileSystem.EncodingType.Base64,
+            });
+            const buffer = Buffer.from(fileInfo, "base64");
+            const view = new DataView(buffer.buffer);
+            let sumSquares = 0;
+            for (let i = 0; i < view.byteLength; i += 2) {
+              const sample = view.getInt16(i, true);
+              sumSquares += sample * sample;
+            }
+            const rms = Math.sqrt(sumSquares / (view.byteLength / 2));
+
+            if (rms > 500) {
+              console.log("🛑 User interrupted with RMS:", rms);
+              interrupted = true;
+              break;
+            }
+
+            await mic.startAsync();
+          } catch {}
+        }
+
+        if (interrupted && soundRef.current) {
+          await soundRef.current.stopAsync();
+          await soundRef.current.unloadAsync();
+          soundRef.current = null;
+          setShowWaveform(false);
+          setStatusText("🎙️ Listening...");
+          isPlayingAudio.current = false;
+        }
       };
 
       reader.readAsDataURL(blob);
     } catch (err) {
-      console.error("❌ Error playing TTS audio", err);
+      console.error("❌ TTS error:", err);
       isPlayingAudio.current = false;
+      setStatusText("🎙️ Listening...");
     }
   };
 
   const recordingOptions: Audio.RecordingOptions = {
     android: {
       extension: ".m4a",
-      outputFormat: 2, // MPEG_4
-      audioEncoder: 3, // AAC
+      outputFormat: 2,
+      audioEncoder: 3,
       sampleRate: 44100,
       numberOfChannels: 1,
       bitRate: 128000,
     },
     ios: {
       extension: ".wav",
-      audioQuality: 128, // HIGH
+      audioQuality: 128,
       sampleRate: 44100,
       numberOfChannels: 1,
       bitRate: 128000,
@@ -253,6 +270,10 @@ export default function VoiceCall() {
       bitsPerSecond: 128000,
     },
   };
+
+  useEffect(() => {
+    startRecordingLoop();
+  }, []);
 
   return (
     <SafeAreaView style={styles.container}>
@@ -280,7 +301,7 @@ export default function VoiceCall() {
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity style={styles.endCallButton} onPress={handleEndCall}>
+        <TouchableOpacity style={styles.endCallButton} onPress={() => router.back()}>
           <X color="#fff" size={32} />
         </TouchableOpacity>
 
@@ -298,18 +319,27 @@ export default function VoiceCall() {
             width: "100%",
           }}
           onSubmitEditing={async () => {
-            await handleUserInput(userInput);
             setUserInput("");
+            setStatusText("🧠 Emma is thinking...");
+            const aiText = await getAIResponse(userInput);
+            await playTTS(aiText);
           }}
         />
-        {isListening && (
-          <Text style={{ color: "#00FF99", marginTop: 12, fontWeight: "500" }}>
-            🎙️ Listening...
-          </Text>
+
+        {showWaveform && (
+          <Animated.View
+            style={{
+              width: 20,
+              height: 20,
+              borderRadius: 10,
+              backgroundColor: "#E50914",
+              marginBottom: 12,
+              transform: [{ scale: bounceAnim }],
+            }}
+          />
         )}
-        {isLoading && (
-          <Text style={{ color: "#aaa" }}>Emma is thinking...</Text>
-        )}
+
+        <Text style={{ color: "#aaa", marginTop: 12 }}>{statusText}</Text>
       </View>
     </SafeAreaView>
   );
