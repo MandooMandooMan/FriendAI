@@ -1,4 +1,11 @@
-import { View, Text, StyleSheet, TouchableOpacity, Animated, Easing } from "react-native";
+import {
+  View,
+  Text,
+  StyleSheet,
+  TouchableOpacity,
+  Animated,
+  Easing,
+} from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { Mic, Volume2, X } from "lucide-react-native";
@@ -142,7 +149,7 @@ export default function VoiceCall() {
       const formData = new FormData();
       formData.append("file", file as any);
 
-      const res = await fetch("http://localhost:5005/transcribe-audio", {
+      const res = await fetch("http://192.168.0.98:5005/transcribe-audio", {
         method: "POST",
         body: formData,
         headers: { "Content-Type": "multipart/form-data" },
@@ -160,21 +167,23 @@ export default function VoiceCall() {
     try {
       isPlayingAudio.current = true;
 
-      const res = await fetch("http://localhost:5005/generate-audio", {
+      const res = await fetch("http://192.168.0.98:5005/generate-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, speaker_id: 0 }),
       });
-
-      if (!res.ok) throw new Error("TTS generation failed");
+      if (!res.ok) throw new Error("TTS generation failed:");
       const blob = await res.blob();
       const reader = new FileReader();
 
       reader.onloadend = async () => {
-        const base64 = typeof reader.result === "string" ? reader.result.split(",")[1] : null;
+        const base64 =
+          typeof reader.result === "string"
+            ? reader.result.split(",")[1]
+            : null;
         if (!base64) return;
 
-        const fileUri = FileSystem.documentDirectory + "tts_output.wav";
+        const fileUri = FileSystem.documentDirectory + "tts.wav";
         await FileSystem.writeAsStringAsync(fileUri, base64, {
           encoding: FileSystem.EncodingType.Base64,
         });
@@ -218,11 +227,11 @@ export default function VoiceCall() {
             }
             const rms = Math.sqrt(sumSquares / (view.byteLength / 2));
 
-            if (rms > 500) {
-              console.log("🛑 User interrupted with RMS:", rms);
-              interrupted = true;
-              break;
-            }
+            // if (rms > 500) {
+            //   console.log("🛑 User interrupted with RMS:", rms);
+            //   interrupted = true;
+            //   break;
+            // }
 
             await mic.startAsync();
           } catch {}
@@ -301,7 +310,10 @@ export default function VoiceCall() {
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity style={styles.endCallButton} onPress={() => router.back()}>
+        <TouchableOpacity
+          style={styles.endCallButton}
+          onPress={() => router.back()}
+        >
           <X color="#fff" size={32} />
         </TouchableOpacity>
 
