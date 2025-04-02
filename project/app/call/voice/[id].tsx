@@ -149,7 +149,7 @@ export default function VoiceCall() {
       const formData = new FormData();
       formData.append("file", file as any);
 
-      const res = await fetch("http://192.168.0.98:5005/transcribe-audio", {
+      const res = await fetch("http://192.168.0.16:5005/transcribe-audio", {
         method: "POST",
         body: formData,
         headers: { "Content-Type": "multipart/form-data" },
@@ -167,7 +167,7 @@ export default function VoiceCall() {
     try {
       isPlayingAudio.current = true;
 
-      const res = await fetch("http://192.168.0.98:5005/generate-audio", {
+      const res = await fetch("http://192.168.0.16:5005/generate-audio", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text, speaker_id: 0 }),
