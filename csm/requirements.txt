@@ -8,4 +8,5 @@ torchtune==0.4.0
 torchao==0.9.0
 silentcipher @ git+https://github.com/SesameAILabs/silentcipher@master
 faster-whisper @ git+https://github.com/SYSTRAN/faster-whisper@master
-bitsandbytes == 0.42.0
+bitsandbytes
+flask_cors
